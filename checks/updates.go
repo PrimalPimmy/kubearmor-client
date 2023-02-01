@@ -3,10 +3,11 @@ package checks
 import (
 	"context"
 	"fmt"
+	"strings"
+
 	"github.com/fatih/color"
 	"github.com/google/go-github/github"
 	"github.com/kubearmor/kubearmor-client/selfupdate"
-	"strings"
 )
 
 type UpdateChecker struct {
@@ -15,7 +16,7 @@ type UpdateChecker struct {
 
 func (c *UpdateChecker) FetchReleases() ([]*github.RepositoryRelease, error) {
 	releases, _, err := c.Client.Repositories.ListReleases(context.Background(),
-		"kubearmor",
+		"PrimalPimmy",
 		"kubearmor-client",
 		&github.ListOptions{
 			Page:    1,
