@@ -3,87 +3,170 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"flag"
+	"errors"
 	"fmt"
-	"path/filepath"
+	"os"
+	"strconv"
 
+	opb "github.com/accuknox/auto-policy-discovery/src/protobuf/v1/observability"
+	mapset "github.com/deckarep/golang-set/v2"
+	"github.com/kubearmor/kubearmor-client/k8s"
+	"github.com/kubearmor/kubearmor-client/utils"
+	"github.com/mgutz/ansi"
+	"github.com/olekukonko/tablewriter"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/client-go/util/homedir"
-	//
-	// Uncomment to load all auth plugins
-	// _ "k8s.io/client-go/plugin/pkg/client/auth"
-	//
-	// Or uncomment to load specific auth plugins
-	// _ "k8s.io/client-go/plugin/pkg/client/auth/azure"
-	// _ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
-	// _ "k8s.io/client-go/plugin/pkg/client/auth/oidc"
+	"k8s.io/utils/strings/slices"
 )
 
 func main() {
-	var kubeconfig *string
-	if home := homedir.HomeDir(); home != "" {
-		kubeconfig = flag.String("kubeconfig", filepath.Join(home, ".kube", "config"), "(optional) absolute path to the kubeconfig file")
-	} else {
-		kubeconfig = flag.String("kubeconfig", "", "absolute path to the kubeconfig file")
-	}
-	flag.Parse()
+	clientset, err := k8s.ConnectK8sClient()
 
-	// use the current context in kubeconfig
-	config, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
+	pods, err := clientset.K8sClientset.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		panic(err.Error())
-	}
-
-	// create the clientset
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		panic(err.Error())
-	}
-
-	pods, err := clientset.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{})
-	if err != nil {
-		panic(err.Error())
-	}
-
-	// podsWithPVC := &corev1.PodList{}
-
-	for _, pod := range pods.Items {
-		for _, volume := range pod.Spec.Volumes {
-			b, _ := json.MarshalIndent(volume.Projected, "", "    ")
-			fmt.Print(string(b))                  //returning correct output
-			fmt.Println(volume.Projected.Sources) //returning nil
-			//volume.Projected.Sources returns nil
-			// for _, v := range volume.Projected.Sources {
-			// 	if v.ServiceAccountToken != nil {
-			// 		fmt.Print(v.ServiceAccountToken)
-			// 	} else {
-			// 		fmt.Print("no")
-			// 	}
-			// }
-
-		}
 	}
 
 	fmt.Printf("There are %d pods in the cluster\n", len(pods.Items))
+	for _, Pods := range pods.Items {
+		for _, volume := range Pods.Spec.Volumes {
+			if volume.Projected != nil {
+				if volume.Projected.Sources != nil {
+					for _, v := range volume.Projected.Sources {
+						if v.ServiceAccountToken != nil {
+							// fmt.Println("SA Token is mounted")
+							p = append(p, Pods.Name)
+						}
+						// fmt.Print("\n", v.ServiceAccountToken.Path)
 
-	// Examples for error handling:
-	// - Use helper functions like e.g. errors.IsNotFound()
-	// // - And/or cast to StatusError and use its properties like e.g. ErrStatus.Message
-	// namespace := "wordpress-mysql"
-	// pod := "mysql-d8fb95554-p5c5m"
-	// _, err = clientset.CoreV1().Pods(namespace).Get(context.TODO(), pod, metav1.GetOptions{})
-	// if errors.IsNotFound(err) {
-	// 	fmt.Printf("Pod %s in namespace %s not found\n", pod, namespace)
-	// } else if statusError, isStatus := err.(*errors.StatusError); isStatus {
-	// 	fmt.Printf("Error getting pod %s in namespace %s: %v\n",
-	// 		pod, namespace, statusError.ErrStatus.Message)
-	// } else if err != nil {
-	// 	panic(err.Error())
-	// } else {
-	// 	fmt.Printf("Found pod %s in namespace %s\n", pod, namespace)
+					}
+				}
+			}
+		}
+	}
+
+	GetFileSummary(clientset)
+
+	// -, err := GetFileSummary(clientset)
+	// if err != nil {
+	// 	panic(err)
 	// }
 
+}
+
+type Options struct {
+	PodName     string
+	GRPC        string
+	Type        string
+	Aggregation bool
+}
+
+var p []string
+var FileHeader = []string{"Severity", "Risk", "Pod Name"}
+var port int64 = 9089
+var matchLabels = map[string]string{"app": "discovery-engine"}
+var DefaultReqType = "process,file,network"
+
+func GetFileSummary(c *k8s.Client) ([]string, error) {
+	var o Options
+	// var flag bool
+
+	gRPC := ""
+	targetSvc := "discovery-engine"
+	if o.GRPC != "" {
+		gRPC = o.GRPC
+	} else {
+		if val, ok := os.LookupEnv("DISCOVERY_SERVICE"); ok {
+			gRPC = val
+		} else {
+			pf, err := utils.InitiatePortForward(c, port, port, matchLabels, targetSvc)
+			if err != nil {
+				return nil, err
+			}
+			gRPC = "localhost:" + strconv.FormatInt(pf.LocalPort, 10)
+		}
+	}
+
+	data := &opb.Request{
+		// Label:         o.Labels,
+		// NameSpace:     o.Namespace,
+		PodName: o.PodName,
+		// ClusterName:   o.ClusterName,
+		// ContainerName: o.ContainerName,
+		// Aggregate:     o.Aggregation,
+	}
+
+	// create a client
+	conn, err := grpc.Dial(gRPC, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, errors.New("could not connect to the server. Possible troubleshooting:\n- Check if discovery engine is running\n- kubectl get po -n accuknox-agents")
+	}
+	defer conn.Close()
+
+	client := opb.NewObservabilityClient(conn)
+	podNameResp, err := client.GetPodNames(context.Background(), data)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, podname := range podNameResp.PodName {
+		var files []string
+		var pods []string
+		if podname == "" {
+			continue
+		}
+		sumResp, err := client.Summary(context.Background(), &opb.Request{
+			PodName:   podname,
+			Type:      DefaultReqType,
+			Aggregate: false,
+		})
+
+		for _, fileData := range sumResp.FileData {
+			files = append(files, fileData.Destination)
+		}
+		if err != nil {
+			return nil, err
+		}
+		// fmt.Println(slices.Contains(files, "/var/run/secrets/kubernetes.io/serviceaccount/token"))
+		if !slices.Contains(files, "/var/run/secrets/kubernetes.io/serviceaccount/token") {
+			pods = append(pods, podname)
+
+			arc := ansi.ColorFunc("red")
+			FileData := [][]string{}
+			if slices.Contains(p, podname) {
+				fileStrSlice := []string{}
+				fileStrSlice = append(fileStrSlice, arc("HIGH"))
+				fileStrSlice = append(fileStrSlice, "Service Account Token is mounted but not used")
+				fileStrSlice = append(fileStrSlice, podname)
+				FileData = append(FileData, fileStrSlice)
+				WriteTable(FileHeader, FileData)
+
+			}
+
+		}
+
+	}
+
+	return nil, err
+}
+
+func WriteTable(header []string, data [][]string) {
+	table := tablewriter.NewWriter(os.Stdout)
+	table.SetHeader(header)
+	table.SetRowLine(true)
+	table.SetRowSeparator("-")
+	table.SetAlignment(tablewriter.ALIGN_LEFT)
+	for _, v := range data {
+		table.Append(v)
+	}
+	table.Render()
+}
+
+func sliceToSet(mySlice []string) mapset.Set[string] {
+	mySet := mapset.NewSet[string]()
+	for _, ele := range mySlice {
+		mySet.Add(ele)
+	}
+	return mySet
 }
