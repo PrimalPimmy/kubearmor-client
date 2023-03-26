@@ -1,11 +1,12 @@
 // Package scan to scan for risks
-package main
+package scan
 
 import (
 	"context"
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strconv"
 
 	opb "github.com/accuknox/auto-policy-discovery/src/protobuf/v1/observability"
@@ -20,12 +21,15 @@ import (
 	"k8s.io/utils/strings/slices"
 )
 
-func main() {
+func Scan(c *k8s.Client, o Options) error {
 	clientset, err := k8s.ConnectK8sClient()
+	if err != nil {
+		return err
+	}
 
 	pods, err := clientset.K8sClientset.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
-		panic(err.Error())
+		return err
 	}
 
 	fmt.Printf("There are %d pods in the cluster\n", len(pods.Items))
@@ -46,8 +50,8 @@ func main() {
 		}
 	}
 
-	GetFileSummary(clientset)
-
+	GetFileSummary(c, o)
+	return nil
 	// -, err := GetFileSummary(clientset)
 	// if err != nil {
 	// 	panic(err)
@@ -56,10 +60,16 @@ func main() {
 }
 
 type Options struct {
-	PodName     string
-	GRPC        string
-	Type        string
-	Aggregation bool
+	GRPC          string
+	Labels        string
+	Namespace     string
+	PodName       string
+	ClusterName   string
+	ContainerName string
+	Type          string
+	Output        string
+	RevDNSLookup  bool
+	Aggregation   bool
 }
 
 var p []string
@@ -68,10 +78,9 @@ var port int64 = 9089
 var matchLabels = map[string]string{"app": "discovery-engine"}
 var DefaultReqType = "process,file,network"
 
-func GetFileSummary(c *k8s.Client) ([]string, error) {
-	var o Options
+func GetFileSummary(c *k8s.Client, o Options) ([]string, error) {
 	// var flag bool
-
+	var s string
 	gRPC := ""
 	targetSvc := "discovery-engine"
 	if o.GRPC != "" {
@@ -89,12 +98,12 @@ func GetFileSummary(c *k8s.Client) ([]string, error) {
 	}
 
 	data := &opb.Request{
-		// Label:         o.Labels,
-		// NameSpace:     o.Namespace,
-		PodName: o.PodName,
-		// ClusterName:   o.ClusterName,
-		// ContainerName: o.ContainerName,
-		// Aggregate:     o.Aggregation,
+		Label:         o.Labels,
+		NameSpace:     o.Namespace,
+		PodName:       o.PodName,
+		ClusterName:   o.ClusterName,
+		ContainerName: o.ContainerName,
+		Aggregate:     o.Aggregation,
 	}
 
 	// create a client
@@ -129,7 +138,13 @@ func GetFileSummary(c *k8s.Client) ([]string, error) {
 			return nil, err
 		}
 		// fmt.Println(slices.Contains(files, "/var/run/secrets/kubernetes.io/serviceaccount/token"))
-		if !slices.Contains(files, "/var/run/secrets/kubernetes.io/serviceaccount/token") {
+		r, _ := regexp.Compile("\\/run\\/secrets\\/kubernetes.io\\/serviceaccount\\/[^\\/]+\\/token")
+		for _, a := range files {
+			s = r.FindString(a)
+		}
+		fmt.Print(slices.Contains(files, "/var/run/secrets/kubernetes.io/serviceaccount/token"), "\n")
+		fmt.Print(s, "\n")
+		if slices.Contains(files, s) == false {
 			pods = append(pods, podname)
 
 			arc := ansi.ColorFunc("red")
