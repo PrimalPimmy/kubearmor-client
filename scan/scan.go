@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	v1 "k8s.io/api/core/v1"
 	"os"
 	"regexp"
 	"strconv"
@@ -13,13 +14,82 @@ import (
 	mapset "github.com/deckarep/golang-set/v2"
 	"github.com/kubearmor/kubearmor-client/k8s"
 	"github.com/kubearmor/kubearmor-client/utils"
-	"github.com/mgutz/ansi"
 	"github.com/olekukonko/tablewriter"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/strings/slices"
 )
+
+type volmount struct {
+	Mounts  string
+	Podname []string
+}
+
+var p volmount
+
+type vol struct {
+	Total []volmount
+}
+
+func (vol *vol) addmount(item volmount) []volmount {
+	vol.Total = append(vol.Total, item)
+	return vol.Total
+}
+
+//func mount(Pods *v1.PodList) {
+//	for _, pods := range Pods.Items {
+//		for _, p := range pods.Spec.Containers {
+//			for _, name := range p.VolumeMounts {
+//				pod := volmount{
+//					Podname: pods.Name,
+//					Mounts:  name.MountPath,
+//				}
+//
+//
+//			}
+//		}
+//	}
+//	b, err := json.MarshalIndent(dets, "", "    ")
+//	if err != nil {
+//		fmt.Println(err)
+//		return
+//	}
+//	fmt.Println(string(b), "\n\n\n\n\n")
+
+func CheckVolSource(volume v1.Volume) interface{} {
+	switch {
+
+	case volume.HostPath != nil:
+		return func() interface{} { return volume.HostPath.Path }
+	case volume.EmptyDir != nil:
+		return func() interface{} { return "emptyDir" }
+	case volume.ConfigMap != nil:
+		return func() interface{} { return volume.ConfigMap.LocalObjectReference.Name }
+	case volume.Secret != nil:
+		return func() interface{} { return volume.Secret.SecretName }
+	case volume.PersistentVolumeClaim != nil:
+		return func() interface{} { return volume.PersistentVolumeClaim.ClaimName }
+	case volume.GitRepo != nil:
+		return func() interface{} { return volume.GitRepo.Repository }
+	case volume.DownwardAPI != nil:
+		return func() interface{} { return "downwardAPI" }
+	case volume.AzureFile != nil:
+		return func() interface{} { return volume.AzureFile.ShareName }
+	case volume.AzureDisk != nil:
+		return func() interface{} { return volume.AzureDisk.DiskName }
+	case volume.FC != nil:
+		return func() interface{} { return volume.FC.TargetWWNs }
+	case volume.Flocker != nil:
+		return func() interface{} { return volume.Flocker.DatasetName }
+	case volume.CephFS != nil:
+		return func() interface{} { return volume.CephFS.Monitors[0] }
+	case volume.Cinder != nil:
+		return func() interface{} { return volume.Cinder.VolumeID }
+	default:
+		return nil
+	}
+}
 
 func Scan(c *k8s.Client, o Options) error {
 	clientset, err := k8s.ConnectK8sClient()
@@ -32,20 +102,25 @@ func Scan(c *k8s.Client, o Options) error {
 		return err
 	}
 
-	fmt.Printf("There are %d pods in the cluster\n", len(pods.Items))
+	fmt.Printf("There are %d Pods in the cluster\n", len(pods.Items))
+	//mount(pods, dets)
 	for _, Pods := range pods.Items {
 		for _, volume := range Pods.Spec.Volumes {
-			if volume.Projected != nil {
+			volSource := CheckVolSource(volume)
+			fmt.Print(volSource)
+			if volSource == volume.Projected {
 				if volume.Projected.Sources != nil {
 					for _, v := range volume.Projected.Sources {
 						if v.ServiceAccountToken != nil {
 							// fmt.Println("SA Token is mounted")
-							p = append(p, Pods.Name)
+							p.Podname = append(p.Podname, Pods.Name)
 						}
 						// fmt.Print("\n", v.ServiceAccountToken.Path)
 
 					}
 				}
+
+			} else {
 			}
 		}
 	}
@@ -72,8 +147,7 @@ type Options struct {
 	Aggregation   bool
 }
 
-var p []string
-var FileHeader = []string{"Severity", "Risk", "Pod Name"}
+var FileHeader = []string{"Accessed By", "Mount Path", "Pod Name", "Last Accessed", "Status"}
 var port int64 = 9089
 var matchLabels = map[string]string{"app": "discovery-engine"}
 var DefaultReqType = "process,file,network"
@@ -118,9 +192,9 @@ func GetFileSummary(c *k8s.Client, o Options) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-
+	FileData := [][]string{}
 	for _, podname := range podNameResp.PodName {
-		var files []string
+		var fi []string
 		var pods []string
 		if podname == "" {
 			continue
@@ -131,37 +205,57 @@ func GetFileSummary(c *k8s.Client, o Options) ([]string, error) {
 			Aggregate: false,
 		})
 
-		for _, fileData := range sumResp.FileData {
-			files = append(files, fileData.Destination)
-		}
 		if err != nil {
 			return nil, err
 		}
 		// fmt.Println(slices.Contains(files, "/var/run/secrets/kubernetes.io/serviceaccount/token"))
 		r, _ := regexp.Compile("\\/run\\/secrets\\/kubernetes.io\\/serviceaccount\\/[^\\/]+\\/token")
-		for _, a := range files {
-			s = r.FindString(a)
+		for _, a := range sumResp.FileData {
+			if r.MatchString(a.Destination) {
+				s = r.FindString(a.Destination)
+			}
 		}
-		fmt.Print(slices.Contains(files, "/var/run/secrets/kubernetes.io/serviceaccount/token"), "\n")
-		fmt.Print(s, "\n")
-		if slices.Contains(files, s) == false {
-			pods = append(pods, podname)
+		//fmt.Print(slices.Contains(file, s), "\n")
+		//fmt.Print(s, "\n")
+		for _, fileData := range sumResp.FileData {
+			fi = append(fi, fileData.Destination)
+		}
 
-			arc := ansi.ColorFunc("red")
-			FileData := [][]string{}
-			if slices.Contains(p, podname) {
-				fileStrSlice := []string{}
-				fileStrSlice = append(fileStrSlice, arc("HIGH"))
-				fileStrSlice = append(fileStrSlice, "Service Account Token is mounted but not used")
-				fileStrSlice = append(fileStrSlice, podname)
-				FileData = append(FileData, fileStrSlice)
-				WriteTable(FileHeader, FileData)
+		for _, f := range sumResp.FileData {
 
+			if f.Destination == s {
+				pods = append(pods, podname)
+
+				if slices.Contains(p.Podname, podname) {
+					fileStrSlice := []string{}
+					fileStrSlice = append(fileStrSlice, f.Source)
+					fileStrSlice = append(fileStrSlice, s)
+					fileStrSlice = append(fileStrSlice, podname)
+					fileStrSlice = append(fileStrSlice, f.UpdatedTime)
+					fileStrSlice = append(fileStrSlice, f.Status)
+					FileData = append(FileData, fileStrSlice)
+				}
 			}
 
 		}
 
+		if slices.Contains(fi, s) == false {
+			pods = append(pods, podname)
+			if slices.Contains(p.Podname, podname) {
+				fileStrSlice := []string{}
+				fileStrSlice = append(fileStrSlice, "-")
+				fileStrSlice = append(fileStrSlice, s)
+				fileStrSlice = append(fileStrSlice, podname)
+				fileStrSlice = append(fileStrSlice, "-")
+				fileStrSlice = append(fileStrSlice, "-")
+				FileData = append(FileData, fileStrSlice)
+				//WriteTable(FileHeader, FileData)
+
+			}
+		}
+
 	}
+	WriteTable(FileHeader, FileData)
 
 	return nil, err
 }
