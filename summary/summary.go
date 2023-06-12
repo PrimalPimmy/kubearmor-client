@@ -109,6 +109,7 @@ func GetSummary(c *k8s.Client, o Options) ([]string, error) {
 			if podname == "" {
 				continue
 			}
+			fmt.Println(podNameResp)
 			sumResp, err := client.Summary(context.Background(), &opb.Request{
 				PodName:   podname,
 				Type:      o.Type,
